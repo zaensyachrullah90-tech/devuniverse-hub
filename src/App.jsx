@@ -24,14 +24,15 @@ import {
   BrainCircuit, 
   Loader2,
   AlertTriangle,
-  Cpu
+  Cpu,
+  Info
 } from 'lucide-react';
 
 // ==========================================
 // KONFIGURASI AMAN (ENVIRONMENT VARIABLES)
 // ==========================================
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "dummy",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   databaseURL: import.meta.env.VITE_FIREBASE_DATABASE_URL,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
@@ -42,7 +43,7 @@ const firebaseConfig = {
 
 const appId = 'dev-universe-hub';
 
-// Inisialisasi hanya jika ada URL Database (mencegah crash di preview jika kosong)
+// Inisialisasi Firebase
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getDatabase(app); 
@@ -59,7 +60,7 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
-  // Autentikasi Anonim
+  // Autentikasi
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -76,22 +77,19 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Fetch Data dari REALTIME DATABASE
+  // Fetch Data Realtime
   useEffect(() => {
     if (!user) return; 
 
     const linksRef = ref(db, `artifacts/${appId}/users/${user.uid}/links`);
-    
     const unsubscribe = onValue(linksRef, (snapshot) => {
       const data = snapshot.val();
       const fetchedLinks = [];
-      
       if (data) {
         for (const id in data) {
           fetchedLinks.push({ id, ...data[id] });
         }
       }
-      
       fetchedLinks.sort((a, b) => b.createdAt - a.createdAt);
       setLinks(fetchedLinks);
       setIsLoading(false);
@@ -99,18 +97,14 @@ export default function App() {
       console.error("Database Error:", error);
       setIsLoading(false);
     });
-
     return () => unsubscribe();
   }, [user]);
 
-  // ==========================================
-  // ARSITEKTUR AI BERLAPIS (DUAL ENGINE)
-  // ==========================================
+  // --- AI ENGINES ---
 
-  // LAYER 1: OpenAI (ChatGPT) - Spesialis Copywriting & Deskripsi
   const fetchOpenAILayer = async (url) => {
     const apiKey = import.meta.env.VITE_OPENAI_API_KEY;
-    if (!apiKey) throw new Error("OpenAI Key Missing");
+    if (!apiKey) throw new Error("API Key OpenAI tidak ditemukan di .env");
 
     const response = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -119,134 +113,108 @@ export default function App() {
         "Authorization": `Bearer ${apiKey}` 
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini", // Model cepat dan murah
+        model: "gpt-4o-mini",
         messages: [
-          { 
-            role: "system", 
-            content: "You are an expert app analyzer. Return ONLY JSON with keys 'title' (short app name) and 'description' (1 professional sentence explaining the app function) based on the URL provided." 
-          },
-          { role: "user", content: `Analyze this URL: ${url}` }
+          { role: "system", content: "Kembalikan JSON: {'title': 'Nama App', 'description': '1 kalimat deskripsi'}" },
+          { role: "user", content: `Analisa URL ini: ${url}` }
         ],
         response_format: { type: "json_object" }
       })
     });
 
+    if (!response.ok) {
+      const errData = await response.json();
+      throw new Error(`OpenAI Error: ${errData.error?.message || response.statusText}`);
+    }
+
     const data = await response.json();
     return JSON.parse(data.choices[0].message.content);
   };
 
-  // LAYER 2: Gemini - Spesialis Kategorisasi & Analisa Teknologi
   const fetchGeminiLayer = async (url) => {
     const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) throw new Error("Gemini Key Missing");
+    if (!apiKey) throw new Error("API Key Gemini tidak ditemukan di .env");
     
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
     
-    const prompt = `Analyze this URL: ${url}. Return ONLY a raw JSON object with exactly two keys: 'category' (e.g., SaaS, E-Commerce, Tool, Dashboard) and 'techStack' (guess the main framework/language used, or write 'Web App' if unsure).`;
-
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ parts: [{ text: `Analisa URL: ${url}. Berikan JSON: {'category': 'Kategori', 'techStack': 'Teknologi'}` }] }],
         generationConfig: { responseMimeType: "application/json" }
       })
     });
+
+    if (!response.ok) throw new Error(`Gemini Error: ${response.statusText}`);
 
     const data = await response.json();
     return JSON.parse(data.candidates[0].content.parts[0].text);
   };
 
-  // HELPER: Ekstrak Favicon
-  const isValidUrl = (string) => { try { new URL(string); return true; } catch (_) { return false; } };
-  const getFavicon = (url) => { try { return `https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=128`; } catch { return "https://cdn-icons-png.flaticon.com/512/1243/1243420.png"; } };
-
-  // ==========================================
-  // EKSEKUSI PEMROSESAN PARALEL
-  // ==========================================
   const handleAddLink = async () => {
     if (!user) return;
     setErrorMsg('');
-    if (!isValidUrl(urlInput)) return setErrorMsg('Format URL tidak valid (Gunakan https://).');
-
     setIsProcessing(true);
-    try {
-      const iconUrl = getFavicon(urlInput);
 
-      // Jalankan ChatGPT dan Gemini secara BERSAMAAN (Paralel) agar 2x lebih cepat!
-      const [openAiData, geminiData] = await Promise.all([
-        fetchOpenAILayer(urlInput).catch(e => {
-          console.warn("OpenAI Failed", e);
-          return { title: "Untitled App", description: "Deskripsi gagal dianalisa AI." };
-        }),
-        fetchGeminiLayer(urlInput).catch(e => {
-          console.warn("Gemini Failed", e);
-          return { category: "Uncategorized", techStack: "Unknown" };
-        })
+    try {
+      const domain = new URL(urlInput).hostname;
+      const iconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=128`;
+
+      // Eksekusi Paralel dengan Error Handling Individual
+      const [openAiResult, geminiResult] = await Promise.allSettled([
+        fetchOpenAILayer(urlInput),
+        fetchGeminiLayer(urlInput)
       ]);
 
-      // Gabungkan hasil dari kedua AI
-      const newLinkDoc = {
+      const finalData = {
         url: urlInput,
         chatLink: chatInput || null,
-        title: openAiData.title,
-        description: openAiData.description,
-        category: geminiData.category,
-        techStack: geminiData.techStack, // Info tambahan dari Gemini!
+        title: openAiResult.status === 'fulfilled' ? openAiResult.value.title : "Untitled App",
+        description: openAiResult.status === 'fulfilled' ? openAiResult.value.description : "Gagal memuat deskripsi AI.",
+        category: geminiResult.status === 'fulfilled' ? geminiResult.value.category : "Uncategorized",
+        techStack: geminiResult.status === 'fulfilled' ? geminiResult.value.techStack : "Web Tech",
         icon: iconUrl,
         createdAt: Date.now()
       };
 
-      // Simpan ke Realtime Database
+      // Tampilkan error di console jika salah satu AI gagal
+      if (openAiResult.status === 'rejected') console.error("OpenAI Failed:", openAiResult.reason);
+      if (geminiResult.status === 'rejected') console.error("Gemini Failed:", geminiResult.reason);
+
       const linksListRef = ref(db, `artifacts/${appId}/users/${user.uid}/links`);
-      const newLinkRef = push(linksListRef);
-      await set(newLinkRef, newLinkDoc);
+      await set(push(linksListRef), finalData);
 
       setUrlInput(''); setChatInput(''); setIsModalOpen(false);
     } catch (err) {
-      setErrorMsg('Gagal menyatukan data AI dan Database.');
+      setErrorMsg(`Error: ${err.message}. Pastikan URL benar dan API Key aktif.`);
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Hapus Data
   const handleDelete = async (id) => {
     if (!user) return;
-    try {
-      const linkRef = ref(db, `artifacts/${appId}/users/${user.uid}/links/${id}`);
-      await remove(linkRef);
-    } catch (err) {
-      console.error("Gagal menghapus", err);
-    }
+    try { await remove(ref(db, `artifacts/${appId}/users/${user.uid}/links/${id}`)); } catch (e) {}
   };
 
-  // Filter Search
   const filteredLinks = useMemo(() => links.filter(link => 
       link.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-      link.category.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (link.techStack && link.techStack.toLowerCase().includes(searchQuery.toLowerCase()))
+      link.category.toLowerCase().includes(searchQuery.toLowerCase())
   ), [links, searchQuery]);
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-indigo-500/30">
-      
-      <nav className="border-b border-white/10 bg-slate-900/50 backdrop-blur-md sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans">
+      <nav className="border-b border-white/10 bg-slate-900/50 backdrop-blur-md sticky top-0 z-10 px-6 py-4">
+        <div className="max-w-7xl mx-auto flex justify-between items-center">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
               <Globe className="text-white w-6 h-6" />
             </div>
-            <div>
-              <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-purple-400">DevUniverse</h1>
-              <p className="text-xs text-slate-400 flex items-center gap-1">
-                <Cpu className="w-3 h-3 text-emerald-400" /> Dual AI Engine (OpenAI + Gemini)
-              </p>
-            </div>
+            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-purple-400">DevUniverse</h1>
           </div>
-          
-          <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl font-semibold transition-all shadow-lg active:scale-95">
-            <Plus className="w-5 h-5" /> Deploy Link
+          <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2.5 rounded-xl font-semibold transition-all">
+            <Plus className="w-5 h-5 inline mr-1" /> Deploy Link
           </button>
         </div>
       </nav>
@@ -257,68 +225,49 @@ export default function App() {
             <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-500" />
             <input 
               type="text" 
-              placeholder="Cari aplikasi atau teknologi..." 
+              placeholder="Cari aplikasi..." 
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-900/80 border border-slate-800 focus:border-indigo-500 rounded-2xl py-3.5 pl-12 pr-4 outline-none transition-all placeholder:text-slate-600"
+              className="w-full bg-slate-900/80 border border-slate-800 focus:border-indigo-500 rounded-2xl py-3.5 pl-12 pr-4 outline-none transition-all"
             />
           </div>
-          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl px-6 py-3 flex-1 md:flex-none text-center">
-            <span className="text-slate-400 text-sm block">Total Active Apps</span>
-            <span className="text-2xl font-bold text-indigo-400">{links.length}</span>
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl px-6 py-3 text-indigo-400 font-bold">
+            {links.length} Active Apps
           </div>
         </div>
 
         {isLoading ? (
-          <div className="flex flex-col items-center justify-center py-32 text-slate-500">
-            <Loader2 className="w-12 h-12 animate-spin mb-4 text-indigo-500" />
-            <p>Mendekripsi data dari Realtime Database...</p>
-          </div>
+          <div className="flex flex-col items-center justify-center py-32"><Loader2 className="animate-spin w-10 h-10 text-indigo-500" /></div>
         ) : filteredLinks.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-32 text-slate-500 border-2 border-dashed border-slate-800 rounded-3xl">
-            <Globe className="w-16 h-16 mb-4 text-slate-700" />
-            <h3 className="text-xl font-bold text-slate-300">Belum Ada Aplikasi</h3>
+          <div className="text-center py-20 border-2 border-dashed border-slate-800 rounded-3xl text-slate-500">
+             <Info className="mx-auto mb-4 w-12 h-12 opacity-20" />
+             <p>Belum ada aplikasi tersimpan.</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {filteredLinks.map((link) => (
-              <div key={link.id} className="group bg-slate-900/60 border border-slate-800 hover:border-indigo-500/50 rounded-3xl p-6 transition-all duration-300 hover:shadow-2xl flex flex-col">
+              <div key={link.id} className="group bg-slate-900/60 border border-slate-800 hover:border-indigo-500/50 rounded-3xl p-6 transition-all duration-300 flex flex-col">
                 <div className="flex justify-between items-start mb-5">
-                  <div className="w-14 h-14 bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-center overflow-hidden">
-                    <img src={link.icon} className="w-8 h-8 object-contain" onError={(e) => { e.target.src = "https://cdn-icons-png.flaticon.com/512/1243/1243420.png" }} />
-                  </div>
-                  <div className="flex flex-col items-end gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="px-3 py-1 bg-slate-800 text-slate-300 text-xs font-bold rounded-full border border-slate-700 uppercase tracking-wide">
-                        {link.category}
-                      </span>
-                      <button onClick={() => handleDelete(link.id)} className="w-8 h-8 rounded-full bg-slate-800/50 text-slate-500 hover:text-red-400 hover:bg-red-500/10 flex items-center justify-center transition-colors opacity-0 group-hover:opacity-100">
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                    {/* Tambahan Info Tech Stack dari Gemini */}
-                    {link.techStack && (
-                      <span className="text-[10px] text-indigo-400 font-medium">⚙️ {link.techStack}</span>
-                    )}
+                  <img src={link.icon} className="w-12 h-12 rounded-xl bg-slate-950 p-2 border border-slate-800" onError={(e) => e.target.src="https://cdn-icons-png.flaticon.com/512/1243/1243420.png"} />
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="px-2 py-0.5 bg-slate-800 text-slate-300 text-[10px] font-bold rounded-md uppercase border border-slate-700">{link.category}</span>
+                    <span className="text-[10px] text-indigo-500 font-medium">⚙️ {link.techStack}</span>
                   </div>
                 </div>
-                
-                <h3 className="text-xl font-bold text-slate-100 mb-2 line-clamp-1">{link.title}</h3>
-                <p className="text-slate-400 text-sm mb-6 flex-grow line-clamp-2 leading-relaxed">{link.description}</p>
-                
-                <div className="grid grid-cols-12 gap-3 mt-auto">
-                  <a href={link.url} target="_blank" rel="noopener noreferrer" className="col-span-9 bg-white/5 hover:bg-white/10 text-white flex items-center justify-center gap-2 py-3 rounded-xl font-semibold transition text-sm border border-white/5">
-                    Buka Aplikasi <ExternalLink className="w-4 h-4" />
+                <h3 className="text-lg font-bold text-white mb-2 line-clamp-1">{link.title}</h3>
+                <p className="text-slate-400 text-sm mb-6 flex-grow line-clamp-2">{link.description}</p>
+                <div className="flex gap-2">
+                  <a href={link.url} target="_blank" className="flex-1 bg-white/5 hover:bg-white/10 text-white text-center py-2.5 rounded-xl font-semibold border border-white/5 flex items-center justify-center gap-2">
+                    Open <ExternalLink className="w-4 h-4" />
                   </a>
-                  {link.chatLink ? (
-                    <a href={link.chatLink} target="_blank" rel="noopener noreferrer" className="col-span-3 bg-indigo-500/10 hover:bg-indigo-500 text-indigo-400 hover:text-white flex items-center justify-center rounded-xl transition border border-indigo-500/20">
+                  {link.chatLink && (
+                    <a href={link.chatLink} target="_blank" className="px-4 bg-indigo-500/10 hover:bg-indigo-500 text-indigo-400 hover:text-white rounded-xl flex items-center transition border border-indigo-500/20">
                       <BrainCircuit className="w-5 h-5" />
                     </a>
-                  ) : (
-                    <div className="col-span-3 bg-slate-800/30 text-slate-600 flex items-center justify-center rounded-xl border border-slate-800">
-                       <MessageSquare className="w-5 h-5" />
-                    </div>
                   )}
+                  <button onClick={() => handleDelete(link.id)} className="px-4 bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white rounded-xl transition border border-red-500/20">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
             ))}
@@ -327,32 +276,19 @@ export default function App() {
       </main>
 
       {isModalOpen && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-[2rem] w-full max-w-lg overflow-hidden shadow-2xl">
-            <div className="p-8">
-              <h2 className="text-2xl font-bold mb-2">Deploy Aplikasi Baru</h2>
-              <p className="text-slate-400 text-sm mb-6">OpenAI & Gemini akan bekerja sama menganalisa link ini.</p>
-              {errorMsg && <div className="mb-4 bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-xl flex items-center gap-3 text-sm"><AlertTriangle className="w-5 h-5" /> {errorMsg}</div>}
-              
-              <div className="space-y-5">
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2">URL Aplikasi (Wajib)</label>
-                  <input type="url" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder="https://..." className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-3.5 outline-none text-slate-200" disabled={isProcessing} />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-slate-300 mb-2 flex justify-between">
-                    <span>Link Chat AI (Opsional)</span>
-                  </label>
-                  <input type="url" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="https://chatgpt.com/... atau gemini..." className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-4 py-3.5 outline-none text-slate-200" disabled={isProcessing} />
-                </div>
+        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg p-8 shadow-2xl">
+            <h2 className="text-2xl font-bold mb-6">Deploy Link Baru</h2>
+            {errorMsg && <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 text-red-400 rounded-xl text-sm flex gap-3"><AlertTriangle className="w-5 h-5 shrink-0" /> {errorMsg}</div>}
+            <div className="space-y-4">
+              <input type="url" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} placeholder="https://..." className="w-full bg-slate-950 border border-slate-800 p-4 rounded-xl outline-none focus:border-indigo-500 transition" />
+              <input type="url" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Link Chat AI (Opsional)" className="w-full bg-slate-950 border border-slate-800 p-4 rounded-xl outline-none focus:border-indigo-500 transition" />
+              <div className="flex gap-3 pt-4">
+                <button onClick={() => setIsModalOpen(false)} className="flex-1 py-4 text-slate-400 hover:text-white transition">Batal</button>
+                <button onClick={handleAddLink} disabled={isProcessing || !urlInput} className="flex-[2] bg-indigo-600 hover:bg-indigo-500 text-white py-4 rounded-xl font-bold flex items-center justify-center gap-2 disabled:opacity-50 transition-all">
+                  {isProcessing ? <><Loader2 className="animate-spin w-5 h-5" /> AI Processing...</> : <><Cpu className="w-5 h-5" /> Deploy</>}
+                </button>
               </div>
-            </div>
-            
-            <div className="p-6 bg-slate-950 border-t border-slate-800 flex gap-3">
-              <button onClick={() => { setIsModalOpen(false); setErrorMsg(''); }} className="px-6 py-3.5 rounded-xl font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-all flex-1" disabled={isProcessing}>Batal</button>
-              <button onClick={handleAddLink} disabled={isProcessing || !urlInput} className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3.5 rounded-xl font-bold flex-[2] flex items-center justify-center gap-2 disabled:opacity-50">
-                {isProcessing ? <><Loader2 className="w-5 h-5 animate-spin" /> Menyatukan Kekuatan AI...</> : <><Cpu className="w-5 h-5" /> Mulai Analisa</>}
-              </button>
             </div>
           </div>
         </div>
